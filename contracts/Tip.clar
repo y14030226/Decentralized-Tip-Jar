@@ -1,0 +1,215 @@
+(define-constant contract-owner tx-sender)
+(define-constant err-owner-only (err u100))
+(define-constant err-insufficient-amount (err u101))
+(define-constant err-transfer-failed (err u102))
+(define-constant err-no-tips (err u103))
+(define-constant err-invalid-amount (err u104))
+(define-constant err-same-sender (err u105))
+
+(define-data-var total-tips-received uint u0)
+(define-data-var total-tips-count uint u0)
+(define-data-var contract-active bool true)
+
+(define-map tips-by-sender principal uint)
+(define-map tip-history uint {sender: principal, amount: uint, stacks-block-height: uint, timestamp: uint})
+(define-map sender-tip-count principal uint)
+
+(define-public (send-tip (amount uint))
+  (let (
+    (sender tx-sender)
+    (current-tips (default-to u0 (map-get? tips-by-sender sender)))
+    (current-count (default-to u0 (map-get? sender-tip-count sender)))
+    (tip-id (+ (var-get total-tips-count) u1))
+  )
+    (asserts! (var-get contract-active) err-owner-only)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (not (is-eq sender contract-owner)) err-same-sender)
+    (match (stx-transfer? amount sender contract-owner)
+      success (begin
+        (var-set total-tips-received (+ (var-get total-tips-received) amount))
+        (var-set total-tips-count tip-id)
+        (map-set tips-by-sender sender (+ current-tips amount))
+        (map-set sender-tip-count sender (+ current-count u1))
+        (map-set tip-history tip-id {
+          sender: sender,
+          amount: amount,
+          stacks-block-height: stacks-block-height,
+          timestamp: (unwrap-panic (get-stacks-block-info? time stacks-block-height))
+        })
+        (ok tip-id)
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-public (withdraw-tips (amount uint))
+  (let (
+    (contract-balance (stx-get-balance (as-contract tx-sender)))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (<= amount contract-balance) err-insufficient-amount)
+    (match (as-contract (stx-transfer? amount tx-sender contract-owner))
+      success (ok amount)
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-public (withdraw-all-tips)
+  (let (
+    (contract-balance (stx-get-balance (as-contract tx-sender)))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> contract-balance u0) err-no-tips)
+    (match (as-contract (stx-transfer? contract-balance tx-sender contract-owner))
+      success (ok contract-balance)
+      error err-transfer-failed
+    )
+  ))
+(define-public (toggle-contract-status)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set contract-active (not (var-get contract-active)))
+    (ok (var-get contract-active))
+  )
+)
+
+(define-public (send-bulk-tip (recipients (list 10 principal)) (amount uint))
+  (let (
+    (sender tx-sender)
+    (total-amount (* amount (len recipients)))
+  )
+    (asserts! (var-get contract-active) err-owner-only)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (> (len recipients) u0) err-invalid-amount)
+    (match (stx-transfer? total-amount sender (as-contract tx-sender))
+      success (begin
+        (map distribute-tip-to-recipient recipients)
+        (var-set total-tips-received (+ (var-get total-tips-received) total-amount))
+        (ok total-amount)
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-private (distribute-tip-to-recipient (recipient principal))
+  (let (
+    (amount u1000000)
+  )
+    (as-contract (stx-transfer? amount tx-sender recipient))
+  )
+)
+
+(define-public (tip-with-message (amount uint) (message (string-ascii 280)))
+  (let (
+    (sender tx-sender)
+    (tip-id (+ (var-get total-tips-count) u1))
+  )
+    (asserts! (var-get contract-active) err-owner-only)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (not (is-eq sender contract-owner)) err-same-sender)
+    (match (stx-transfer? amount sender contract-owner)
+      success (begin
+        (var-set total-tips-received (+ (var-get total-tips-received) amount))
+        (var-set total-tips-count tip-id)
+        (map-set tip-messages tip-id {
+          sender: sender,
+          amount: amount,
+          message: message,
+          stacks-block-height: stacks-block-height
+        })
+        (ok tip-id)
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-map tip-messages uint {sender: principal, amount: uint, message: (string-ascii 280), stacks-block-height: uint})
+
+(define-read-only (get-contract-owner)
+  contract-owner
+)
+
+
+(define-read-only (get-total-tips-received)
+  (var-get total-tips-received))
+
+
+(define-read-only (get-total-tips-count)
+  (var-get total-tips-count))
+
+
+(define-read-only (get-contract-balance)
+  (stx-get-balance (as-contract tx-sender)))
+
+
+(define-read-only (get-tips-by-sender (sender principal))
+  (default-to u0 (map-get? tips-by-sender sender)))
+
+
+(define-read-only (get-sender-tip-count (sender principal))
+  (default-to u0 (map-get? sender-tip-count sender)))
+
+
+(define-read-only (get-tip-history (tip-id uint))
+  (map-get? tip-history tip-id))
+
+
+(define-read-only (get-contract-status)
+  (var-get contract-active))
+
+
+(define-read-only (get-tip-message (tip-id uint))
+  (map-get? tip-messages tip-id))
+
+
+(define-read-only (get-contract-stats)
+  {
+    total-tips: (var-get total-tips-received),
+    tip-count: (var-get total-tips-count),
+    contract-balance: (stx-get-balance (as-contract tx-sender)),
+    owner: contract-owner,
+    active: (var-get contract-active)
+  })
+
+
+(define-read-only (calculate-average-tip)
+  (if (> (var-get total-tips-count) u0)
+    (/ (var-get total-tips-received) (var-get total-tips-count))
+    u0
+  )
+)
+
+(define-read-only (get-top-tipper-info (sender principal))
+  (let (
+    (total-tipped (default-to u0 (map-get? tips-by-sender sender)))
+    (tip-count (default-to u0 (map-get? sender-tip-count sender)))
+  )
+    {
+      total-tipped: total-tipped,
+      tip-count: tip-count,
+      average-tip: (if (> tip-count u0)
+                      (/ total-tipped tip-count)
+                      u0)
+    }
+  )
+)
+
+(define-read-only (is-generous-tipper (sender principal))
+  (let (
+    (sender-average (let (
+                          (tip-count (default-to u0 (map-get? sender-tip-count sender)))
+                          (total-tipped (default-to u0 (map-get? tips-by-sender sender)))
+                        )
+                        (if (> tip-count u0)
+                          (/ total-tipped tip-count)
+                          u0)))
+    (global-average (calculate-average-tip))
+  )
+    (and (> sender-average u0) (>= sender-average global-average))
+  )
+)
