@@ -6,6 +6,13 @@
 (define-constant err-invalid-amount (err u104))
 (define-constant err-same-sender (err u105))
 
+(define-constant err-not-found (err u404))
+(define-constant err-unauthorized (err u401))
+(define-constant err-already-released (err u409))
+(define-constant err-not-expired (err u403))
+
+(define-data-var escrow-counter uint u0)
+
 (define-data-var total-tips-received uint u0)
 (define-data-var total-tips-count uint u0)
 (define-data-var contract-active bool true)
@@ -213,3 +220,77 @@
     (and (> sender-average u0) (>= sender-average global-average))
   )
 )
+
+
+
+(define-map escrows uint {
+  creator: principal,
+  beneficiary: principal,
+  amount: uint,
+  deadline: uint,
+  released: bool,
+  description: (string-ascii 500)
+})
+
+(define-public (create-escrow (beneficiary principal) (deadline uint) (description (string-ascii 500)))
+  (let (
+    (escrow-id (+ (var-get escrow-counter) u1))
+    (amount (stx-get-balance tx-sender))
+  )
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (> deadline stacks-block-height) err-invalid-amount)
+    (match (stx-transfer? amount tx-sender (as-contract tx-sender))
+      success (begin
+        (var-set escrow-counter escrow-id)
+        (map-set escrows escrow-id {
+          creator: tx-sender,
+          beneficiary: beneficiary,
+          amount: amount,
+          deadline: deadline,
+          released: false,
+          description: description
+        })
+        (ok escrow-id)
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-public (release-escrow (escrow-id uint))
+  (let (
+    (escrow-data (unwrap! (map-get? escrows escrow-id) err-not-found))
+  )
+    (asserts! (is-eq tx-sender (get creator escrow-data)) err-unauthorized)
+    (asserts! (not (get released escrow-data)) err-already-released)
+    (match (as-contract (stx-transfer? (get amount escrow-data) tx-sender (get beneficiary escrow-data)))
+      success (begin
+        (map-set escrows escrow-id (merge escrow-data {released: true}))
+        (ok (get amount escrow-data))
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-public (claim-expired-escrow (escrow-id uint))
+  (let (
+    (escrow-data (unwrap! (map-get? escrows escrow-id) err-not-found))
+  )
+    (asserts! (>= stacks-block-height (get deadline escrow-data)) err-not-expired)
+    (asserts! (not (get released escrow-data)) err-already-released)
+    (match (as-contract (stx-transfer? (get amount escrow-data) tx-sender (get creator escrow-data)))
+      success (begin
+        (map-set escrows escrow-id (merge escrow-data {released: true}))
+        (ok (get amount escrow-data))
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-read-only (get-escrow (escrow-id uint))
+  (map-get? escrows escrow-id))
+
+(define-read-only (get-total-escrows)
+  (var-get escrow-counter))
