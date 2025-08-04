@@ -10,8 +10,22 @@
 (define-constant err-unauthorized (err u401))
 (define-constant err-already-released (err u409))
 (define-constant err-not-expired (err u403))
+(define-constant err-milestone-not-reached (err u406))
 
 (define-data-var escrow-counter uint u0)
+
+(define-constant milestone-bronze u1000000)
+(define-constant milestone-silver u5000000)
+(define-constant milestone-gold u10000000)
+(define-constant milestone-platinum u25000000)
+
+(define-map user-achievements principal {
+  bronze: bool,
+  silver: bool,
+  gold: bool,
+  platinum: bool,
+  last-updated: uint
+})
 
 (define-data-var total-tips-received uint u0)
 (define-data-var total-tips-count uint u0)
@@ -43,6 +57,7 @@
           stacks-block-height: stacks-block-height,
           timestamp: (unwrap-panic (get-stacks-block-info? time stacks-block-height))
         })
+        (unwrap-panic (update-user-achievements sender))
         (ok tip-id)
       )
       error err-transfer-failed
@@ -294,3 +309,66 @@
 
 (define-read-only (get-total-escrows)
   (var-get escrow-counter))
+
+(define-public (update-user-achievements (user principal))
+  (let (
+    (total-tipped (default-to u0 (map-get? tips-by-sender user)))
+    (current-achievements (default-to {bronze: false, silver: false, gold: false, platinum: false, last-updated: u0} 
+                                      (map-get? user-achievements user)))
+    (new-bronze (>= total-tipped milestone-bronze))
+    (new-silver (>= total-tipped milestone-silver))
+    (new-gold (>= total-tipped milestone-gold))
+    (new-platinum (>= total-tipped milestone-platinum))
+  )
+    (map-set user-achievements user {
+      bronze: new-bronze,
+      silver: new-silver,
+      gold: new-gold,
+      platinum: new-platinum,
+      last-updated: stacks-block-height
+    })
+    (ok true)
+  )
+)
+
+(define-read-only (get-user-achievements (user principal))
+  (default-to {bronze: false, silver: false, gold: false, platinum: false, last-updated: u0}
+              (map-get? user-achievements user)))
+
+(define-read-only (get-milestone-progress (user principal))
+  (let (
+    (total-tipped (default-to u0 (map-get? tips-by-sender user)))
+    (next-milestone (if (< total-tipped milestone-bronze) milestone-bronze
+                       (if (< total-tipped milestone-silver) milestone-silver
+                          (if (< total-tipped milestone-gold) milestone-gold
+                             (if (< total-tipped milestone-platinum) milestone-platinum u0)))))
+  )
+    {
+      total-tipped: total-tipped,
+      next-milestone: next-milestone,
+      progress-percentage: (if (> next-milestone u0)
+                              (/ (* total-tipped u100) next-milestone)
+                              u100)
+    }
+  )
+)
+
+(define-read-only (get-achievement-tier (user principal))
+  (let (
+    (total-tipped (default-to u0 (map-get? tips-by-sender user)))
+  )
+    (if (>= total-tipped milestone-platinum) u4
+       (if (>= total-tipped milestone-gold) u3
+          (if (>= total-tipped milestone-silver) u2
+             (if (>= total-tipped milestone-bronze) u1 u0))))
+  )
+)
+
+(define-read-only (get-milestone-thresholds)
+  {
+    bronze: milestone-bronze,
+    silver: milestone-silver,
+    gold: milestone-gold,
+    platinum: milestone-platinum
+  }
+)
