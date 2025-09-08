@@ -11,8 +11,11 @@
 (define-constant err-already-released (err u409))
 (define-constant err-not-expired (err u403))
 (define-constant err-milestone-not-reached (err u406))
+(define-constant err-self-referral (err u407))
+(define-constant err-no-referral-rewards (err u408))
 
 (define-data-var escrow-counter uint u0)
+(define-data-var referral-reward-rate uint u10)
 
 (define-constant milestone-bronze u1000000)
 (define-constant milestone-silver u5000000)
@@ -34,6 +37,10 @@
 (define-map tips-by-sender principal uint)
 (define-map tip-history uint {sender: principal, amount: uint, stacks-block-height: uint, timestamp: uint})
 (define-map sender-tip-count principal uint)
+
+(define-map user-referrals principal principal)
+(define-map referral-rewards principal uint)
+(define-map referral-counts principal uint)
 
 (define-public (send-tip (amount uint))
   (let (
@@ -372,3 +379,85 @@
     platinum: milestone-platinum
   }
 )
+
+(define-public (send-tip-with-referral (amount uint) (referrer principal))
+  (let (
+    (sender tx-sender)
+    (current-tips (default-to u0 (map-get? tips-by-sender sender)))
+    (current-count (default-to u0 (map-get? sender-tip-count sender)))
+    (tip-id (+ (var-get total-tips-count) u1))
+    (reward-amount (/ (* amount (var-get referral-reward-rate)) u100))
+    (owner-amount (- amount reward-amount))
+  )
+    (asserts! (var-get contract-active) err-owner-only)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (not (is-eq sender contract-owner)) err-same-sender)
+    (asserts! (not (is-eq sender referrer)) err-self-referral)
+    (match (stx-transfer? owner-amount sender contract-owner)
+      success (begin
+        (match (stx-transfer? reward-amount sender (as-contract tx-sender))
+          reward-success (begin
+            (var-set total-tips-received (+ (var-get total-tips-received) amount))
+            (var-set total-tips-count tip-id)
+            (map-set tips-by-sender sender (+ current-tips amount))
+            (map-set sender-tip-count sender (+ current-count u1))
+            (map-set tip-history tip-id {
+              sender: sender,
+              amount: amount,
+              stacks-block-height: stacks-block-height,
+              timestamp: (unwrap-panic (get-stacks-block-info? time stacks-block-height))
+            })
+            (map-set user-referrals sender referrer)
+            (map-set referral-rewards referrer (+ (default-to u0 (map-get? referral-rewards referrer)) reward-amount))
+            (map-set referral-counts referrer (+ (default-to u0 (map-get? referral-counts referrer)) u1))
+            (unwrap-panic (update-user-achievements sender))
+            (ok tip-id)
+          )
+          error err-transfer-failed
+        )
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-public (withdraw-referral-rewards)
+  (let (
+    (reward-balance (default-to u0 (map-get? referral-rewards tx-sender)))
+  )
+    (asserts! (> reward-balance u0) err-no-referral-rewards)
+    (match (as-contract (stx-transfer? reward-balance tx-sender tx-sender))
+      success (begin
+        (map-set referral-rewards tx-sender u0)
+        (ok reward-balance)
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-public (set-referral-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (<= new-rate u50) err-invalid-amount)
+    (var-set referral-reward-rate new-rate)
+    (ok new-rate)
+  )
+)
+
+(define-read-only (get-referral-info (user principal))
+  {
+    referrer: (map-get? user-referrals user),
+    reward-balance: (default-to u0 (map-get? referral-rewards user)),
+    referral-count: (default-to u0 (map-get? referral-counts user))
+  }
+)
+
+(define-read-only (get-referral-rate)
+  (var-get referral-reward-rate))
+
+(define-read-only (get-referral-earnings (referrer principal))
+  (default-to u0 (map-get? referral-rewards referrer)))
+
+(define-read-only (get-referral-count (referrer principal))
+  (default-to u0 (map-get? referral-counts referrer)))
