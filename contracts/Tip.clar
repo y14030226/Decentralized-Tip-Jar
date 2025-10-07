@@ -13,9 +13,17 @@
 (define-constant err-milestone-not-reached (err u406))
 (define-constant err-self-referral (err u407))
 (define-constant err-no-referral-rewards (err u408))
+(define-constant err-no-active-campaign (err u409))
+(define-constant err-campaign-depleted (err u410))
+(define-constant err-campaign-active (err u411))
 
 (define-data-var escrow-counter uint u0)
 (define-data-var referral-reward-rate uint u10)
+
+(define-data-var matching-campaign-active bool false)
+(define-data-var matching-pool uint u0)
+(define-data-var matching-ratio uint u100)
+(define-data-var total-matched uint u0)
 
 (define-constant milestone-bronze u1000000)
 (define-constant milestone-silver u5000000)
@@ -461,3 +469,107 @@
 
 (define-read-only (get-referral-count (referrer principal))
   (default-to u0 (map-get? referral-counts referrer)))
+
+(define-public (create-matching-campaign (pool-amount uint) (ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (not (var-get matching-campaign-active)) err-campaign-active)
+    (asserts! (> pool-amount u0) err-invalid-amount)
+    (asserts! (> ratio u0) err-invalid-amount)
+    (asserts! (<= ratio u200) err-invalid-amount)
+    (match (stx-transfer? pool-amount tx-sender (as-contract tx-sender))
+      success (begin
+        (var-set matching-campaign-active true)
+        (var-set matching-pool pool-amount)
+        (var-set matching-ratio ratio)
+        (var-set total-matched u0)
+        (ok pool-amount)
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-public (end-matching-campaign)
+  (let (
+    (remaining-pool (var-get matching-pool))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (var-get matching-campaign-active) err-no-active-campaign)
+    (var-set matching-campaign-active false)
+    (var-set matching-pool u0)
+    (if (> remaining-pool u0)
+      (match (as-contract (stx-transfer? remaining-pool tx-sender contract-owner))
+        success (ok remaining-pool)
+        error err-transfer-failed
+      )
+      (ok u0)
+    )
+  )
+)
+
+(define-public (send-matched-tip (amount uint))
+  (let (
+    (sender tx-sender)
+    (current-tips (default-to u0 (map-get? tips-by-sender sender)))
+    (current-count (default-to u0 (map-get? sender-tip-count sender)))
+    (tip-id (+ (var-get total-tips-count) u1))
+    (match-amount (/ (* amount (var-get matching-ratio)) u100))
+    (available-pool (var-get matching-pool))
+    (actual-match (if (> match-amount available-pool) available-pool match-amount))
+    (total-amount (+ amount actual-match))
+  )
+    (asserts! (var-get contract-active) err-owner-only)
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (not (is-eq sender contract-owner)) err-same-sender)
+    (asserts! (var-get matching-campaign-active) err-no-active-campaign)
+    (asserts! (> available-pool u0) err-campaign-depleted)
+    (match (stx-transfer? amount sender contract-owner)
+      success (begin
+        (var-set total-tips-received (+ (var-get total-tips-received) total-amount))
+        (var-set total-tips-count tip-id)
+        (var-set matching-pool (- available-pool actual-match))
+        (var-set total-matched (+ (var-get total-matched) actual-match))
+        (map-set tips-by-sender sender (+ current-tips total-amount))
+        (map-set sender-tip-count sender (+ current-count u1))
+        (map-set tip-history tip-id {
+          sender: sender,
+          amount: total-amount,
+          stacks-block-height: stacks-block-height,
+          timestamp: (unwrap-panic (get-stacks-block-info? time stacks-block-height))
+        })
+        (unwrap-panic (update-user-achievements sender))
+        (if (is-eq (var-get matching-pool) u0)
+          (var-set matching-campaign-active false)
+          true
+        )
+        (ok {tip-id: tip-id, matched: actual-match, total: total-amount})
+      )
+      error err-transfer-failed
+    )
+  )
+)
+
+(define-read-only (get-matching-campaign-status)
+  {
+    active: (var-get matching-campaign-active),
+    pool-remaining: (var-get matching-pool),
+    match-ratio: (var-get matching-ratio),
+    total-matched: (var-get total-matched)
+  }
+)
+
+(define-read-only (calculate-match-preview (tip-amount uint))
+  (let (
+    (match-amount (/ (* tip-amount (var-get matching-ratio)) u100))
+    (available-pool (var-get matching-pool))
+    (actual-match (if (> match-amount available-pool) available-pool match-amount))
+  )
+    {
+      user-tip: tip-amount,
+      match-amount: actual-match,
+      total-value: (+ tip-amount actual-match),
+      campaign-active: (var-get matching-campaign-active)
+    }
+  )
+)
